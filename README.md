@@ -1,0 +1,2 @@
+ - Reference:https://www.aesworkshops.com/log-analytics/mainlab/
+ - License: https://www.aesworkshops.com/license/ 
