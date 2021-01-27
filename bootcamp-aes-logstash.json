@@ -1,0 +1,445 @@
+{
+    "AWSTemplateFormatVersion":"2010-09-09",
+    "Description":"AES Logging Solution - Logstash Servers.  **Attention** This template creates AWS resources that will incur charges on your account.",
+    "Parameters":{
+        "NetworkStackName": {
+            "Description": "Name of an active CloudFormation stack that contains the networking resources, such as the subnet and security group, that will be used in this stack.",
+            "Type": "String"
+        },
+        "RedisEndpoint": {
+            "Description": "Name of Redis endpoint.",
+            "Type": "String"
+	},
+	"ElasticsearchEndpoint": {
+            "Description": "Endpoint of your Amazon Elasticsearch Domain.",
+            "Type": "String"
+        },
+        "OperatorEMail":{
+            "Description":"EMail address to notify if there are any scaling operations",
+            "Type":"String",
+            "AllowedPattern":"([a-zA-Z0-9_\\-\\.\\+]+)@((\\[[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.)|(([a-zA-Z0-9\\-]+\\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\\]?)",
+            "ConstraintDescription":"must be a valid email address."
+        },
+        "KeyName":{
+            "Description":"The EC2 Key Pair to allow SSH access to all the instances for this solution",
+            "Type":"AWS::EC2::KeyPair::KeyName",
+            "ConstraintDescription":"must be the name of an existing EC2 KeyPair."
+        }
+    },
+    "Mappings":{
+        "AWSEC2AMI":{
+            "us-east-1":{"AmiId":"ami-428aa838"},
+            "us-east-2":{"AmiId":"ami-710e2414"},
+            "us-west-1":{"AmiId":"ami-4a787a2a"},
+            "us-west-2":{"AmiId":"ami-7f43f307"},
+            "ap-south-1":{"AmiId":"ami-3b2f7954"},
+            "ap-northeast-2":{"AmiId":"ami-3e04a450"},
+            "ap-southeast-1":{"AmiId":"ami-4f89f533"},
+            "ap-southeast-2":{"AmiId":"ami-38708c5a"},
+            "ap-northeast-1":{"AmiId":"ami-c2680fa4"},
+            "ca-central-1":{"AmiId":"ami-7549cc11"},
+            "eu-central-1":{"AmiId":"ami-1b2bb774"},
+            "eu-west-1":{"AmiId":"ami-db1688a2"},
+            "eu-west-2":{"AmiId":"ami-6d263d09"},
+            "eu-west-3":{"AmiId":"ami-5ce55321"},
+            "sa-east-1":{"AmiId":"ami-f1337e9d"}
+	}
+    },
+    "Resources":{
+        "LogstashNotificationTopic":{
+            "Type":"AWS::SNS::Topic",
+            "Properties":{
+                "Subscription":[
+                    {
+                        "Endpoint":{
+                            "Ref":"OperatorEMail"
+                        },
+                        "Protocol":"email"
+                    }
+                ]
+            }
+        },
+        "LogstashSecurityGroup":{
+            "Type":"AWS::EC2::SecurityGroup",
+            "Properties":{
+                "GroupDescription":"Enable SSH access",
+                "SecurityGroupIngress":[
+                    {
+                        "IpProtocol":"tcp",
+                        "FromPort":"22",
+                        "ToPort":"22",
+                        "CidrIp":{"Fn::ImportValue" : {"Fn::Sub": "${NetworkStackName}-VPCCIDRBlock"}}
+                    }
+                ],
+                "VpcId":{"Fn::ImportValue" : {"Fn::Sub": "${NetworkStackName}-VPCID"}}
+            }
+        },
+        "LogstashServerGroup":{
+            "Type":"AWS::AutoScaling::AutoScalingGroup",
+            "Properties":{
+                "VPCZoneIdentifier":[ { "Fn::ImportValue" : {"Fn::Sub": "${NetworkStackName}-PrivateSubnetApp0"}}, { "Fn::ImportValue" : {"Fn::Sub": "${NetworkStackName}-PrivateSubnetApp1"}}],
+                "LaunchConfigurationName":{
+                    "Ref":"LaunchConfig"
+                },
+                "MinSize":"1",
+                "MaxSize":"2",
+                "Tags":[
+                    {"Key": "Name","Value": {"Fn::Join": ["",[{"Fn::ImportValue" : {"Fn::Sub": "${NetworkStackName}-EnvTag"}},"-logstash-servers"]]},"PropagateAtLaunch":"true"}
+                ],
+                "NotificationConfiguration":{
+                    "TopicARN":{
+                        "Ref":"LogstashNotificationTopic"
+                    },
+                    "NotificationTypes":[
+                        "autoscaling:EC2_INSTANCE_LAUNCH",
+                        "autoscaling:EC2_INSTANCE_LAUNCH_ERROR",
+                        "autoscaling:EC2_INSTANCE_TERMINATE",
+                        "autoscaling:EC2_INSTANCE_TERMINATE_ERROR"
+                    ]
+                }
+            },
+            "CreationPolicy":{
+                "ResourceSignal":{
+                    "Timeout":"PT15M",
+                    "Count":"1"
+                }
+            },
+            "UpdatePolicy":{
+                "AutoScalingRollingUpdate":{
+                    "MinInstancesInService":"1",
+                    "MaxBatchSize":"1",
+                    "PauseTime":"PT15M",
+                    "WaitOnResourceSignals":"true"
+                }
+            }
+        },
+        "LaunchConfig":{
+            "Type":"AWS::AutoScaling::LaunchConfiguration",
+            "Metadata":{
+                "Comment":"Install a simple application",
+                "AWS::CloudFormation::Init":{
+                    "configSets":{
+                        "default":["repo","therest","stashstart"]
+                    },   
+                    "repo":{
+                        "files":{
+                            "/etc/yum.repos.d/elastic.repo":{
+                                "content":{
+                                    "Fn::Join":[
+                                        "",
+                                        [
+                                            "[logstash-5.x]\n",
+                                            "name=Elastic repository for 5.x packages\n",
+                                            "baseurl=https://artifacts.elastic.co/packages/5.x/yum\n",
+                                            "gpgcheck=1\n",
+                                            "gpgkey=https://artifacts.elastic.co/GPG-KEY-elasticsearch\n",
+                                            "enabled=1\n",
+                                            "autorefresh=1\n",
+                                            "type=rpm-md\n"
+                                        ]
+                                    ]
+                                },
+                                "mode":"000644",
+                                "owner":"root",
+                                "group":"root"
+                            }
+                        } 
+                    },
+                    "therest":{
+                        "packages":{
+                            "yum":{
+                                "logstash":[],
+                                "metricbeat":[]
+                            }
+                        },
+                        "files":{
+                            "/etc/logstash/conf.d/logstash.conf":{
+                                "content":{
+                                    "Fn::Join":[
+                                        "",
+                                        [
+                                            "input {\n",
+                                            "    redis {\n",
+                                            "        host => [\"",
+                                            { "Ref": "RedisEndpoint" },
+                                            "\"]\n",
+                                            "        data_type => \"list\"\n",
+                                            "        key => \"filebeat\"\n",
+                                            "    }\n",
+                                            "}\n",
+					    "filter {\n",
+					    "    grok {\n",
+					    "        match => { \"message\" => \"%{COMBINEDAPACHELOG}\" }\n",
+					    "    }\n",
+					    "    mutate {\n",
+					    "        convert => { \"bytes\" => \"integer\" }\n",
+					    "    }\n",
+					    "    mutate {\n",
+					    "        convert => { \"response\" => \"integer\" }\n",
+					    "    }\n",
+					    "    grok {\n",
+                                            "        match => { \"request\" => \"%{PATH}\\?keyword\\=%{GREEDYDATA:keywords}\" }\n",
+					    "    }\n",
+					    "    mutate {\n",
+					    "        gsub => [ \"keywords\", \"\\+\", \" \" ]\n",
+					    "    }\n",
+					    "}\n",
+                                            "output {\n",
+                                            "    elasticsearch { hosts => [\"","https://",
+					    { "Ref": "ElasticsearchEndpoint"},                                         
+                                            ":443\"]}\n",
+                                            "}\n"
+                                        ]
+                                    ]         
+                                },
+                                "mode":"000644",
+                                "owner":"root",
+                                "group":"root"
+                            },
+                            "/etc/metricbeat/metricbeat.yml":{
+                                "content":{
+                                    "Fn::Join":[
+                                        "",
+                                        [
+                                            "metricbeat.modules:\n",
+                                            "- module: system\n",
+                                            "  metricsets:\n",
+                                            "    - cpu\n",
+                                            "    - load\n",
+                                            "    - filesystem\n",
+                                            "    - fsstat\n",
+                                            "    - memory\n",
+                                            "    - network\n",
+                                            "    - process\n",
+                                            "  enabled: true\n",
+                                            "  period: 10s\n",
+                                            "  processes: ['.*']\n",
+                                            "name: \"logstash-server\"\n",
+                                            "output.elasticsearch:\n",
+                                            "  hosts: [\"",
+                                        { "Ref" : "ElasticsearchEndpoint" },
+                                            ":443",
+                                            "\"]\n",
+                                            "  protocol: \"https\"\n",
+                                            "logging.to_syslog: true\n"	
+                                        ]
+                                    ]         
+                                },
+                                "mode":"000600",
+                                "owner":"root",
+                                "group":"root"
+                             },    
+                            "/etc/cfn/cfn-hup.conf":{
+                                "content":{
+                                    "Fn::Join":[
+                                        "",
+                                        [
+                                            "[main]\n",
+                                            "stack=",
+                                            {
+                                                "Ref":"AWS::StackId"
+                                            },
+                                            "\n",
+                                            "region=",
+                                            {
+                                                "Ref":"AWS::Region"
+                                            },
+                                            "\n"
+                                        ]
+                                    ]
+                                },
+                                "mode":"000400",
+                                "owner":"root",
+                                "group":"root"
+                            },
+                            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":{
+                                "content":{
+                                    "Fn::Join":[
+                                        "",
+                                        [
+                                            "[cfn-auto-reloader-hook]\n",
+                                            "triggers=post.update\n",
+                                            "path=Resources.LaunchConfig.Metadata.AWS::CloudFormation::Init\n",
+                                            "action=/opt/aws/bin/cfn-init -v ",
+                                            "         --stack ",
+                                            {
+                                                "Ref":"AWS::StackName"
+                                            },
+                                            "         --resource LaunchConfig ",
+                                            "         --region ",
+                                            {
+                                                "Ref":"AWS::Region"
+                                            },
+                                            "\n",
+                                            "runas=root\n"
+                                        ]
+                                    ]
+                                },
+                                "mode":"000400",
+                                "owner":"root",
+                                "group":"root"
+                            }
+                        },
+                        "services":{
+                            "sysvinit":{
+                                "metricbeat":{
+                                    "enabled":"true",
+                                    "ensureRunning":"true"
+				                },
+                                "cfn-hup":{
+                                    "enabled":"true",
+                                    "ensureRunning":"true",
+                                    "files":[
+                                        "/etc/cfn/cfn-hup.conf",
+                                        "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                    "stashstart":{
+                        "commands" : {
+                            "stash" : {
+                                "command" : "systemctl start logstash.service",
+                                "ignoreErrors" : "false"
+                            }
+                        }
+                    }
+                }
+            },
+            "Properties":{
+                "KeyName" : { "Ref" : "KeyName" },
+                "ImageId":{
+                    "Fn::FindInMap":[
+                        "AWSEC2AMI",
+                        {
+                            "Ref":"AWS::Region"
+                        },
+                        "AmiId"
+                    ]
+                },
+                "SecurityGroups":[
+                    {
+                        "Ref":"LogstashSecurityGroup"
+                    }
+                ],
+                "InstanceType":"t2.large",
+                "UserData":{
+                    "Fn::Base64":{
+                        "Fn::Join":[
+                            "",
+                            [
+                                "#!/bin/bash -xe\n",
+                                "yum update -y aws-cfn-bootstrap\n",
+                                "yum update -y aws-cli\n",
+                                "rpm --import https://packages.elastic.co/GPG-KEY-elasticsearch\n",
+                                "yum install -y java-1.8.0-openjdk-1.8.0.161-0.b14.amzn2.x86_64\n",
+                                "/opt/aws/bin/cfn-init -c default -v ",
+                                
+                                "         --stack ",
+                                {
+                                    "Ref":"AWS::StackName"
+                                },
+                                "         --resource LaunchConfig ",
+                                "         --region ",
+                                {
+                                    "Ref":"AWS::Region"
+                                },
+                                "\n",
+                                "/opt/aws/bin/cfn-signal -e $? ",
+                                "         --stack ",
+                                {
+                                    "Ref":"AWS::StackName"
+                                },
+                                "         --resource LogstashServerGroup ",
+                                "         --region ",
+                                {
+                                    "Ref":"AWS::Region"
+                                },
+                                "\n"
+                            ]
+                        ]
+                    }
+                }
+            }
+        },
+        "LogstashScaleUpPolicy":{
+            "Type":"AWS::AutoScaling::ScalingPolicy",
+            "Properties":{
+                "AdjustmentType":"ChangeInCapacity",
+                "AutoScalingGroupName":{
+                    "Ref":"LogstashServerGroup"
+                },
+                "Cooldown":"60",
+                "ScalingAdjustment":"1"
+            }
+        },
+        "LogstashScaleDownPolicy":{
+            "Type":"AWS::AutoScaling::ScalingPolicy",
+            "Properties":{
+                "AdjustmentType":"ChangeInCapacity",
+                "AutoScalingGroupName":{
+                    "Ref":"LogstashServerGroup"
+                },
+                "Cooldown":"60",
+                "ScalingAdjustment":"-1"
+            }
+        },
+        "CPUAlarmHigh":{
+            "Type":"AWS::CloudWatch::Alarm",
+            "Properties":{
+                "AlarmDescription":"Scale-up if CPU > 90% for 10 minutes",
+                "MetricName":"CPUUtilization",
+                "Namespace":"AWS/EC2",
+                "Statistic":"Average",
+                "Period":"300",
+                "EvaluationPeriods":"2",
+                "Threshold":"90",
+                "AlarmActions":[
+                    {
+                        "Ref":"LogstashScaleUpPolicy"
+                    }
+                ],
+                "Dimensions":[
+                    {
+                        "Name":"AutoScalingGroupName",
+                        "Value":{
+                            "Ref":"LogstashServerGroup"
+                        }
+                    }
+                ],
+                "ComparisonOperator":"GreaterThanThreshold"
+            }
+        },
+        "CPUAlarmLow":{
+            "Type":"AWS::CloudWatch::Alarm",
+            "Properties":{
+                "AlarmDescription":"Scale-down if CPU < 70% for 10 minutes",
+                "MetricName":"CPUUtilization",
+                "Namespace":"AWS/EC2",
+                "Statistic":"Average",
+                "Period":"300",
+                "EvaluationPeriods":"2",
+                "Threshold":"70",
+                "AlarmActions":[
+                    {
+                        "Ref":"LogstashScaleDownPolicy"
+                    }
+                ],
+                "Dimensions":[
+                    {
+                        "Name":"AutoScalingGroupName",
+                        "Value":{
+                            "Ref":"LogstashServerGroup"
+                        }
+                    }
+                ],
+                "ComparisonOperator":"LessThanThreshold"
+            }
+        }
+
+    },
+    "Outputs":{
+    }
+}
+

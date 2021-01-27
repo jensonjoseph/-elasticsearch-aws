@@ -1,0 +1,136 @@
+{
+    "Description":"AES Logging Solution - Mother of all AES Logging stacks. **Attention** This template creates AWS resources that will incur charges on your account.",
+    "Parameters":{
+        "EnvironmentTag":{
+            "Description":"Enter Environment Tag",
+            "Type": "String",
+            "MinLength" : 3,
+            "MaxLength" : 48,
+            "AllowedPattern" : "^[a-z][-a-z0-9]*$",
+	    "Default":"aeslab"
+        },
+        "CIDRPrefix":{
+            "Description":"Enter Class B CIDR Prefix (e.g. 192.168, 10.1, 172.16)",
+            "Type":"String", 
+            "AllowedPattern":"(192\\.168)|10\\.[0-9][0-9]{0,1}|(172\\.([1][6-9]|[2][0-9]|[3][0-1]))",
+            "ConstraintDescription":"must be a valid Private Subnet CIDR Prefix between 192.168 or 10.{0-99} or 172.16",
+	    "Default":"10.1"
+        },
+        "KeyName":{
+            "Description":"The EC2 Key Pair to allow SSH access to all the instances for this solution",
+            "Type":"AWS::EC2::KeyPair::KeyName",
+            "ConstraintDescription":"must be the name of an existing EC2 KeyPair."
+        },
+        "ElasticsearchDomainName":{
+            "Description": "Name of the Elasticsearch Domain you wish to create.",
+            "Type": "String",
+            "MinLength" : 3,
+            "MaxLength" : 28,
+            "AllowedPattern" : "^[a-z][-a-z0-9]*$",
+	    "Default":"labdomain"
+        },
+        "OperatorEMail":{
+            "Description":"EMail address to notify if there are any scaling operations",
+            "Type":"String",
+            "AllowedPattern":"([a-zA-Z0-9_\\-\\.]+)@((\\[[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.)|(([a-zA-Z0-9\\-]+\\.)+))([a-zA-Z]{2,4}|[0-9]{1,3})(\\]?)",
+            "ConstraintDescription":"must be a valid email address."
+        }
+    },
+    "Resources":{
+    
+        "network": {
+            "Type" : "AWS::CloudFormation::Stack",
+            "Properties" : {
+                "TemplateURL" : "https://s3-us-east-2.amazonaws.com/search-sa-log-solutions/logstash/templates/json/bootcamp-aes-network",
+                "Parameters" : {
+                    "EnvironmentTag" : {"Ref" : "EnvironmentTag"},
+                    "CIDRPrefix" : {"Ref" : "CIDRPrefix"}
+                }
+            }            
+        },
+        "redis" : {
+            "Type" : "AWS::CloudFormation::Stack",
+            "Properties" : {
+                "TemplateURL" : "https://s3-us-east-2.amazonaws.com/search-sa-log-solutions/logstash/templates/json/bootcamp-aes-redis",
+                "Parameters" : {
+                    "NetworkStackName" : { "Fn::GetAtt" : [ "network", "Outputs.StackName" ] }
+                }
+            }            
+        },
+        "elasticsearch" : {
+            "Type" : "AWS::CloudFormation::Stack",
+            "Properties" : {
+                "TemplateURL" : "https://s3-us-east-2.amazonaws.com/search-sa-log-solutions/logstash/templates/json/bootcamp-aes-domain",
+                "Parameters" : {
+                    "NetworkStackName" : { "Fn::GetAtt" : [ "network", "Outputs.StackName" ] },
+                    "ElasticsearchDomainName" : {"Ref" : "ElasticsearchDomainName"}
+                }
+            }            
+        },
+	"portal" : {
+            "Type" : "AWS::CloudFormation::Stack",
+            "Properties" : {
+                "TemplateURL" : "https://s3-us-east-2.amazonaws.com/search-sa-log-solutions/logstash/templates/json/bootcamp-aes-mgmt-portal",
+                "Parameters" : {
+                    "NetworkStackName" : { "Fn::GetAtt" : [ "network", "Outputs.StackName" ] },
+                    "ElasticsearchEndpoint" : { "Fn::GetAtt" : [ "elasticsearch", "Outputs.ElasticsearchEndpoint" ] },
+                    "KeyName" : {"Ref" : "KeyName"}
+                }
+            }            
+        },
+	"logstash" : {
+            "Type" : "AWS::CloudFormation::Stack",
+            "Properties" : {
+                "TemplateURL" : "https://s3-us-east-2.amazonaws.com/search-sa-log-solutions/logstash/templates/json/bootcamp-aes-logstash",
+                "Parameters" : {
+                    "NetworkStackName" : { "Fn::GetAtt" : [ "network", "Outputs.StackName" ] },
+                    "RedisEndpoint" : { "Fn::GetAtt" : [ "redis", "Outputs.RedisEndpointAddress" ] },
+                    "ElasticsearchEndpoint" : { "Fn::GetAtt" : [ "elasticsearch", "Outputs.ElasticsearchEndpoint" ] },
+                    "OperatorEMail" : {"Ref" : "OperatorEMail"},
+                    "KeyName" : {"Ref" : "KeyName"}
+                }
+            }            
+        },
+        "application" : {
+            "Type" : "AWS::CloudFormation::Stack",
+            "Properties" : {
+                "TemplateURL" : "https://s3-us-east-2.amazonaws.com/search-sa-log-solutions/logstash/templates/json/bootcamp-aes-servers",
+                "Parameters" : {
+                    "NetworkStackName" : { "Fn::GetAtt" : [ "network", "Outputs.StackName" ] },
+                    "RedisEndpoint" : { "Fn::GetAtt" : [ "redis", "Outputs.RedisEndpointAddress" ] },
+                    "RedisEndpointPort" : { "Fn::GetAtt" : [ "redis", "Outputs.RedisEndpointPort" ] },
+                    "ElasticsearchEndpoint" : { "Fn::GetAtt" : [ "elasticsearch", "Outputs.ElasticsearchEndpoint" ] },
+                    "OperatorEMail" : {"Ref" : "OperatorEMail"},
+                    "KeyName" : {"Ref" : "KeyName"}
+                }
+            }            
+        }	
+    },
+    "Outputs":{
+	"ManagementPortalUserAndHostIP":{
+            "Description":"Management portal public IP address.",
+            "Value": {"Fn::Join":["",["ec2-user@",{"Fn::GetAtt":["portal","Outputs.LinuxManagementPortalPublicIP"]}]]}, 
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-ManagementPortalUserAndHostIP" }}
+        },
+        "ElasticsearchEndpointForPortForwarding":{
+            "Description":"Elastic Search Endpoint for Port Forwarding",
+            "Value": {"Fn::Join":["",[{"Fn::GetAtt":["elasticsearch","Outputs.ElasticsearchEndpoint"]},":80"]]}, 
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-ElasticsearchEndpointForPortForwarding"}}
+        },
+	"LinuxAndMacPortForwardingCommand":{
+            "Description":"Linux and MAC Port Forwarding SSH Command",
+            "Value": {"Fn::Join":["",["ssh -i /path/to/your/key.pem -N -L 9200:",{"Fn::GetAtt":["elasticsearch","Outputs.ElasticsearchEndpoint"]},":80 ec2-user@",{"Fn::GetAtt":["portal","Outputs.LinuxManagementPortalPublicIP"]}]]}, 
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-LinuxAndMacPortForwardingCommand"}}
+        },
+        "ApplicationLoadBalancerURL":{
+            "Description":"Access URL of the Application ALB",
+            "Value": { "Fn::GetAtt" : [ "application", "Outputs.URL" ] },
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-ApplicationLoadBalancerURL" }}
+        },	
+	"SSHKeyName":{	
+            "Description":"SSH Key Name.",
+            "Value": { "Ref" : "KeyName"},
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-SSHKeyName" }}
+        }
+    }
+}        

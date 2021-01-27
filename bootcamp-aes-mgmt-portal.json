@@ -1,0 +1,181 @@
+{
+    "AWSTemplateFormatVersion":"2010-09-09", 
+    "Description":"AES Logging Solution - Management Portal.  **Attention** This template creates AWS resources that will incur charges on your account.",
+    "Parameters":{
+        "NetworkStackName": {
+            "Description": "Name of an active CloudFormation stack that contains the networking resources.",
+            "Type": "String"
+        },
+	"ElasticsearchEndpoint": {
+            "Description": "Endpoint of the Amazon Elasticsearch Domain",
+            "Type": "String"
+	},
+        "KeyName":{
+            "Description":"The EC2 Key Pair to allow SSH access to all the instances for this solution",
+            "Type":"AWS::EC2::KeyPair::KeyName",
+            "ConstraintDescription":"must be the name of an existing EC2 KeyPair."
+        }
+    },
+    "Mappings":{
+        "AWSEC2AMILinux":{
+            "us-east-1":{"AmiId":"ami-428aa838"},
+            "us-east-2":{"AmiId":"ami-710e2414"},
+            "us-west-1":{"AmiId":"ami-4a787a2a"},
+            "us-west-2":{"AmiId":"ami-7f43f307"},
+            "ap-south-1":{"AmiId":"ami-3b2f7954"},
+            "ap-northeast-2":{"AmiId":"ami-3e04a450"},
+            "ap-southeast-1":{"AmiId":"ami-4f89f533"},
+            "ap-southeast-2":{"AmiId":"ami-38708c5a"},
+            "ap-northeast-1":{"AmiId":"ami-c2680fa4"},
+            "ca-central-1":{"AmiId":"ami-7549cc11"},
+            "eu-central-1":{"AmiId":"ami-1b2bb774"},
+            "eu-west-1":{"AmiId":"ami-db1688a2"},
+            "eu-west-2":{"AmiId":"ami-6d263d09"},
+            "eu-west-3":{"AmiId":"ami-5ce55321"},
+            "sa-east-1":{"AmiId":"ami-f1337e9d"}
+	}
+    },
+    "Resources":{
+        "ManagementPortalSecurityGroup":{
+            "Type":"AWS::EC2::SecurityGroup",
+            "Properties":{
+                "GroupDescription":"Rules for allowing access to the portal",
+                "VpcId" : {"Fn::ImportValue" : {"Fn::Sub": "${NetworkStackName}-VPCID"}},		
+                "SecurityGroupIngress":
+                [
+                    {
+                        "IpProtocol":"tcp",
+                        "FromPort":"22",
+                        "ToPort":"22",
+                        "CidrIp":"0.0.0.0\/0"
+                    }
+                ],
+                "SecurityGroupEgress":
+		[
+                    {
+		        "IpProtocol":"-1",
+			"FromPort":"0",
+			"ToPort":"65535",
+			"CidrIp":"0.0.0.0\/0"
+                    }
+                ],
+		"Tags":[
+                    {"Key": "Name","Value": {"Fn::Join": ["",[{"Fn::ImportValue" : {"Fn::Sub": "${NetworkStackName}-EnvTag"}},"-linux-mgmt-portal-sg"]]}}
+                ]
+            }
+        },
+        "ManagementPortalIPAddress":{
+            "Type":"AWS::EC2::EIP",
+            "Properties":{
+                "Domain":"vpc"
+            }
+        },
+        "ManagementPortalNetworkInterface":{
+            "Type":"AWS::EC2::NetworkInterface",
+            "Properties":{
+                "Description":"Linux Management Portal ENI",
+                "PrivateIpAddress": {"Fn::Join": ["",[{"Fn::ImportValue" : {"Fn::Sub": "${NetworkStackName}-VPCCIDRPrefix"}},".1.101"]]},
+                "GroupSet":[{"Ref":"ManagementPortalSecurityGroup"}],
+                "SubnetId": {"Fn::ImportValue" : {"Fn::Sub": "${NetworkStackName}-PublicSubnet1"}},
+                "Tags":[
+                    {"Key": "Name","Value": {"Fn::Join": ["",[{"Fn::ImportValue" : {"Fn::Sub": "${NetworkStackName}-EnvTag"}},"-linux-mgmt-portal-if"]]}}
+                ]
+            }
+        },
+        "AssociateEIPManagementPortal" : {
+            "Type" : "AWS::EC2::EIPAssociation",
+            "Properties" : {
+                "AllocationId" : { "Fn::GetAtt" : [ "ManagementPortalIPAddress", "AllocationId" ]},
+                "NetworkInterfaceId" : { "Ref" : "ManagementPortalNetworkInterface" }
+            }
+        },
+        "ManagementPortal":{
+            "Type":"AWS::EC2::Instance",
+            "Properties":{
+                "Tags":[
+                    {"Key": "Name","Value": {"Fn::Join": ["",[{"Fn::ImportValue" : {"Fn::Sub": "${NetworkStackName}-EnvTag"}},"-linux-mgmt-portal"]]}}
+                ],
+                "ImageId":{
+                    "Fn::FindInMap":[
+                        "AWSEC2AMILinux",
+                        {
+                            "Ref":"AWS::Region"
+                        },
+			"AmiId"
+                    ]
+                },
+                "InstanceType":"t2.large",
+                "UserData":{
+                    "Fn::Base64":{
+                        "Fn::Join":[
+                            "",
+                            [
+                                "#!/bin/bash -xe\n",
+                                "yum update -y aws-cli\n",
+				"yum install -y gcc\n",
+				"cd /home/ec2-user\n",
+                                "wget https://s3-us-east-2.amazonaws.com/search-sa-log-solutions/logstash/packages/redis-stable.tar.gz\n",
+				"wget https://s3-us-east-2.amazonaws.com/search-sa-log-solutions/logstash/packages/imdb-for-es.tgz\n",
+                                "tar -xzf redis-stable.tar.gz --no-same-owner --no-same-permissions\n",
+				"tar -xzf imdb-for-es.tgz --no-same-owner --no-same-permissions\n",
+                                "cd redis-stable/src\n",
+				"make redis-cli\n",
+				"cd ../..\n",
+				"cd imdb-for-es\n",
+				"sed -i -e 's/http:\\/\\///g' convert-imdb-data.py\n",
+				"curl -XPUT ",
+				{"Ref":"ElasticsearchEndpoint"},
+				"/movies -H \"content-type:application/json\" -d@imdb_mapping.json\n",
+				"python convert-imdb-data.py --endpoint https://",
+				{"Ref" : "ElasticsearchEndpoint"},
+				"\n",
+				"cd ..\n",
+				"chown -R ec2-user:ec2-user imdb-for-es\n",
+				"chown -R ec2-user:ec2-user redis-stable\n",
+                                "cd /home/ec2-user\n",
+                                "mkdir metric-dash\n",
+                                "cd metric-dash\n",
+                                "wget https://s3-eu-west-1.amazonaws.com/poc-appstream/es-template/Metricbeat-host-overview.json\n",
+                                "wget https://s3-eu-west-1.amazonaws.com/poc-appstream/es-template/Metricbeat-system-overview.json\n",
+                                "wget https://s3-eu-west-1.amazonaws.com/poc-appstream/es-template/Metricbeat-containers-overview.json\n",
+                                "wget https://s3-eu-west-1.amazonaws.com/poc-appstream/es-template/Metricbeat-apache-overview.json\n",
+                                "curl -X POST ",
+                                {"Ref":"ElasticsearchEndpoint"},
+                                "/_plugin/kibana/api/kibana/dashboards/import?exclude=index-pattern -H 'kbn-xsrf: true' -H 'Content-Type: application/json' -d@Metricbeat-host-overview.json\n",
+                                "curl -X POST ",
+                                {"Ref":"ElasticsearchEndpoint"},
+                                "/_plugin/kibana/api/kibana/dashboards/import?exclude=index-pattern -H 'kbn-xsrf: true' -H 'Content-Type: application/json' -d@Metricbeat-system-overview.json\n",
+                                "curl -X POST ",
+                                {"Ref":"ElasticsearchEndpoint"},
+                                "/_plugin/kibana/api/kibana/dashboards/import?exclude=index-pattern -H 'kbn-xsrf: true' -H 'Content-Type: application/json' -d@Metricbeat-containers-overview.json\n",
+                                "curl -X POST ",
+                                {"Ref":"ElasticsearchEndpoint"},
+                                "/_plugin/kibana/api/kibana/dashboards/import?exclude=index-pattern -H 'kbn-xsrf: true' -H 'Content-Type: application/json' -d@Metricbeat-apache-overview.json\n",
+                                "cd ..\n",
+                                "chown -R ec2-user:ec2-user metric-dash\n",
+                                "\n"
+                            ]
+                        ]
+                    }
+                },
+                "KeyName" : { "Ref" : "KeyName" },
+                "NetworkInterfaces":[
+                    {
+                        "DeviceIndex":"0",
+                        "NetworkInterfaceId":{"Ref":"ManagementPortalNetworkInterface"}
+		    }
+                ]
+            }
+        }
+    },
+    "Outputs":{
+        "LinuxManagementPortalPublicIP":{
+            "Description":"Management portal Public IP address.",
+            "Value": {"Ref":"ManagementPortalIPAddress"},
+            "Export" : { "Name" : {"Fn::Sub": "${AWS::StackName}-LinuxManagementPortalPublicIP" }}
+        }
+    }
+}    
+
+
+
